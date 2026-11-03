@@ -3,6 +3,16 @@
 extern "C"
 {
 #pragma region cURL Web Interactions
+    int StartDirectDownload(const char *url, const char *finalPath);
+    int GetDirectDownloadState();
+    int GetDirectDownloadErrorCode();
+    int GetDirectDownloadHttpStatus();
+    uint64_t GetDirectDownloadTotalBytes();
+    uint64_t GetDirectDownloadCurrentBytes();
+    uint64_t GetDirectDownloadSpeedBytesPerSecond();
+    void CancelDirectDownload();
+    int ResetDirectDownload();
+    int ConfigureHttp(const char *caBundlePath);
     char *GetDownloadInfo(const char *info);
     bool HasDownloadCompleted();
     bool HasDownloadErrorOccured();
@@ -39,10 +49,13 @@ extern "C"
 
 #pragma region Filesystem Operations
     const char *GetDiskInfo(const char *infoType, const char *mountPoint);
+    uint64_t GetDiskFreeBytes(const char *mountPoint);
     void CreateDirectory(const char *dirPath);
     void WriteFile(const char *content, const char *file);
     void AppendFile(const char *content, const char *file);
     void MountRootDirectories();
+    int InstallLocalPackageResult(const char *file, const char *name, const char *iconURI, bool deleteAfter);
+    int InstallWebPackageResult(const char *url, const char *name, const char *titleId, const char *iconURL);
     void InstallLocalPackage(const char *file, const char *name, const char *iconURI, bool deleteAfter);
     void InstallWebPackage(const char *url, const char *name, const char *titleId, const char *iconURL);
     void ExtractZipFile(const char *filePath, const char *outPath);
@@ -55,6 +68,7 @@ extern "C"
     void BreakFromSandbox();
     void MountInSandbox(const char *systemPath, const char *mountName);
     void UnmountFromSandbox(const char *mountName);
+    int InitializePackageServices();
     void InitializeNativeDialogs();
     void ExitApplication();
     void UpdateViaHomebrewStore(const char *query);

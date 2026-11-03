@@ -30,7 +30,8 @@ namespace UnityOrbisBridge
                 { DiskInfo.Percent, Marshal.PtrToStringAnsi(PrivateImports.GetDiskInfo("percentUsed", mountPoint)) }
             };
 
-            return diskInfo.TryGetValue(info, out var value) ? value : string.Empty;
+            string value;
+            return diskInfo.TryGetValue(info, out value) ? value : string.Empty;
         }
 
         public static string GetDiskInfoAsFormattedText(DiskInfo info, string mountPoint = "/user")

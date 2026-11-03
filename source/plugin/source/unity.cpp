@@ -1,9 +1,16 @@
 #include "../headers/includes.hpp"
 
+#include <mutex>
+
 jbc_cred g_Creds, g_RootCreds;
 
+static bool messageDialogModuleLoaded = false;
+static bool commonDialogInitialized = false;
 static bool nativeDialogInitialized = false;
 static bool hasBrokenFromTheSandbox = false;
+static bool appInstModuleLoaded = false;
+static bool bgftModuleLoaded = false;
+static std::mutex nativeServicesMutex;
 
 bool PS5_Jailbreak()
 {
@@ -159,21 +166,63 @@ void UnmountFromSandbox(const char *mountName)
         PrintToConsole("Unmount: Failed", 2);
 }
 
-void InitializeNativeDialogs()
+int InitializePackageServices()
 {
+    std::lock_guard<std::mutex> lock(nativeServicesMutex);
+
+    int ret;
+    if (!messageDialogModuleLoaded)
+    {
+        ret = sceSysmoduleLoadModule(ORBIS_SYSMODULE_MESSAGE_DIALOG);
+        if (ret)
+            return ret;
+        messageDialogModuleLoaded = true;
+    }
+    if (!commonDialogInitialized)
+    {
+        ret = sceCommonDialogInitialize();
+        if (ret)
+            return ret;
+        commonDialogInitialized = true;
+    }
+    if (nativeDialogInitialized && sceMsgDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_NONE)
+        nativeDialogInitialized = false;
     if (!nativeDialogInitialized)
     {
+        ret = sceMsgDialogInitialize();
+        if (ret)
+            return ret;
         nativeDialogInitialized = true;
-
-        printAndLogFmt(0, "Initiating native message dialogs...");
-
-        sceSysmoduleLoadModule(ORBIS_SYSMODULE_MESSAGE_DIALOG);
-        sceCommonDialogInitialize();
-        sceMsgDialogInitialize();
-
-        sceKernelLoadStartModule("/system/common/lib/libSceAppInstUtil.sprx", 0, 0, 0, 0, 0);
-        sceKernelLoadStartModule("/system/common/lib/libSceBgft.sprx", 0, 0, 0, 0, 0);
     }
+
+    if (!appInstModuleLoaded)
+    {
+        const int32_t handle = static_cast<int32_t>(
+            sceKernelLoadStartModule("/system/common/lib/libSceAppInstUtil.sprx", 0, 0, 0, 0, 0));
+        if (handle < 0)
+            return handle;
+        appInstModuleLoaded = true;
+    }
+    if (!bgftModuleLoaded)
+    {
+        const int32_t handle = static_cast<int32_t>(
+            sceKernelLoadStartModule("/system/common/lib/libSceBgft.sprx", 0, 0, 0, 0, 0));
+        if (handle < 0)
+            return handle;
+        bgftModuleLoaded = true;
+    }
+
+    ret = app_inst_util_init_result();
+    if (ret)
+        return ret;
+    return bgft_init_result();
+}
+
+void InitializeNativeDialogs()
+{
+    const int result = InitializePackageServices();
+    if (result != 0)
+        printAndLogFmt(4, "Native service initialization failed: 0x%08X", result);
 }
 
 void ExitApplication()
@@ -186,12 +235,19 @@ void ExitApplication()
 void UpdateViaHomebrewStore(const char *query)
 {
     int32_t userId = 0;
-    char *titleId = nullptr;
+    char titleIdBuffer[16] = {0};
+    char *ownedTitleId = nullptr;
+    const char *titleId = nullptr;
 
     BreakFromSandbox();
 
-    while (!IsFreeOfSandbox())
-        sceKernelSleep(1);
+    for (int attempt = 0; attempt < 300 && !IsFreeOfSandbox(); ++attempt)
+        sceKernelUsleep(100000);
+    if (!IsFreeOfSandbox())
+    {
+        printAndLogFmt(3, "Timed out while leaving the sandbox.");
+        return;
+    }
 
     InitializeNativeDialogs();
 
@@ -205,30 +261,45 @@ void UpdateViaHomebrewStore(const char *query)
 
         printAndLogFmt(1, "Attempting to download the Homebrew Store...");
 
-        DownloadWebFile(storeUrl, "/user/app/store_download.pkg", false, "Homebrew Store");
-
-        while (downloadProgress < 99 && !hasDownloadCompleted && !downloadErrorOccured)
-            sceKernelSleep(1);
-
-        if (hasDownloadCompleted && !downloadErrorOccured)
+        const int startResult = StartDirectDownload(storeUrl, "/user/app/store_download.pkg");
+        if (startResult != 0)
         {
-            printAndLogFmt(1, "Now installing the Homebrew Store...");
-
-            InstallLocalPackage("/user/app/store_download.pkg", "Homebrew Store", "", true);
-
-            if (IsPlayStation5())
-            {
-                while (!CheckIfAppExists("NPXS39041"))
-                    sceKernelSleep(1);
-            }
-
-            ResetDownloadVars();
-        }
-        else
-        {
-            printAndLogFmt(3, "Failed to download the Homebrew Store!");
-
+            printAndLogFmt(3, "Failed to start Homebrew Store download: %d", startResult);
             return;
+        }
+
+        while (GetDirectDownloadState() == DIRECT_DOWNLOAD_RUNNING)
+            sceKernelUsleep(100000);
+
+        const int downloadState = GetDirectDownloadState();
+        const int downloadError = GetDirectDownloadErrorCode();
+        const int httpStatus = GetDirectDownloadHttpStatus();
+        if (ResetDirectDownload() != 0)
+        {
+            printAndLogFmt(3, "Homebrew Store download worker did not reach a resettable state.");
+            return;
+        }
+
+        if (downloadState != DIRECT_DOWNLOAD_SUCCEEDED)
+        {
+            printAndLogFmt(3, "Failed to download the Homebrew Store (curl=%d, HTTP=%d).",
+                           downloadError, httpStatus);
+            return;
+        }
+
+        printAndLogFmt(1, "Now installing the Homebrew Store...");
+        const int installResult =
+            InstallLocalPackageResult("/user/app/store_download.pkg", "Homebrew Store", "", true);
+        if (installResult != 0)
+        {
+            printAndLogFmt(3, "Failed to install the Homebrew Store: 0x%08X", installResult);
+            return;
+        }
+
+        if (IsPlayStation5())
+        {
+            while (!CheckIfAppExists("NPXS39041"))
+                sceKernelSleep(1);
         }
     }
     else
@@ -248,18 +319,42 @@ void UpdateViaHomebrewStore(const char *query)
     if (!IsPlayStation5())
     {
         if (query != nullptr && query[0] != '\0')
-            titleId = strdup(query);
+        {
+            ownedTitleId = strdup(query);
+            if (!ownedTitleId)
+            {
+                printAndLogFmt(3, "Failed to allocate Homebrew Store launch query.");
+                return;
+            }
+            titleId = ownedTitleId;
+        }
         else
-            sceLncUtilGetAppTitleId(sceSystemServiceGetAppIdOfBigApp(), titleId);
+        {
+            const int result =
+                sceLncUtilGetAppTitleId(sceSystemServiceGetAppIdOfBigApp(), titleIdBuffer);
+            if (result != 0)
+            {
+                printAndLogFmt(3, "Failed to resolve current application title ID: 0x%08X", result);
+                return;
+            }
+            titleId = titleIdBuffer;
+        }
     }
     else
     {
         if (query != nullptr && query[0] != '\0')
-            titleId = strdup(query);
+        {
+            ownedTitleId = strdup(query);
+            if (!ownedTitleId)
+            {
+                printAndLogFmt(3, "Failed to allocate Homebrew Store launch query.");
+                return;
+            }
+            titleId = ownedTitleId;
+        }
         else
         {
             printAndLogFmt(1, "No query provided to launch Homebrew Store...");
-
             return;
         }
     }
@@ -282,6 +377,5 @@ void UpdateViaHomebrewStore(const char *query)
     if (res == 2157182993)
         printAndLogFmt(1, "Homebrew Store has launched successfully!");
 
-    if (titleId)
-        free(titleId);
+    free(ownedTitleId);
 }

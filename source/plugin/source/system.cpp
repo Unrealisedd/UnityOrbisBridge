@@ -1,5 +1,9 @@
 #include "../headers/includes.hpp"
 
+#include <cerrno>
+#include <limits>
+#include <mutex>
+
 std::string consoleType;
 
 #pragma region Logging and Notifications
@@ -227,6 +231,48 @@ const char *GetDiskInfo(const char *infoType, const char *mountPoint)
     return result.c_str();
 }
 
+uint64_t GetDiskFreeBytes(const char *mountPoint)
+{
+    if (!mountPoint || !*mountPoint)
+        mountPoint = "/user";
+
+    static int (*fstatfsFunction)(int fd, struct statfs *buf) = nullptr;
+    static std::once_flag resolveOnce;
+    static int resolveResult = -1;
+    std::call_once(resolveOnce, []()
+                   {
+                       const int32_t libKernel = static_cast<int32_t>(
+                           sceKernelLoadStartModule("/system/common/lib/libkernel.sprx", 0, 0, 0, 0, 0));
+                       if (libKernel < 0)
+                       {
+                           resolveResult = libKernel;
+                           return;
+                       }
+                       resolveResult = sceKernelDlsym(
+                           libKernel, "_fstatfs", reinterpret_cast<void **>(&fstatfsFunction));
+                   });
+    if (resolveResult != 0 || !fstatfsFunction)
+        return std::numeric_limits<uint64_t>::max();
+
+    const int fd = open(mountPoint, O_RDONLY);
+    if (fd < 0)
+        return std::numeric_limits<uint64_t>::max();
+
+    struct statfs info;
+    const int result = fstatfsFunction(fd, &info);
+    close(fd);
+    if (result != 0 || info.f_bsize == 0)
+        return std::numeric_limits<uint64_t>::max();
+    if (info.f_bavail == 0)
+        return 0;
+
+    const uint64_t blocks = static_cast<uint64_t>(info.f_bavail);
+    const uint64_t blockSize = static_cast<uint64_t>(info.f_bsize);
+    if (blocks > std::numeric_limits<uint64_t>::max() / blockSize)
+        return std::numeric_limits<uint64_t>::max();
+    return blocks * blockSize;
+}
+
 void CreateDirectory(const char *dirPath)
 {
     struct stat info;
@@ -287,46 +333,66 @@ void MountRootDirectories()
         mount_large_fs(devices[i], mount_points[i], "exfatfs", "511", 0x0000000000010000ULL);
 }
 
-void InstallLocalPackage(const char *file, const char *name, const char *iconURI, bool deleteAfter)
+int InstallLocalPackageResult(const char *file, const char *name, const char *iconURI, bool deleteAfter)
 {
-    bool status = false;
-
+    if (!file || !*file || !name)
+        return EINVAL;
     PrintToConsole("Starting package installation...", 0);
+    if (!IsPlayStation5())
+    {
+        const int initializationResult = InitializePackageServices();
+        if (initializationResult != 0)
+            return initializationResult;
+        return installPKG(file, name, iconURI, deleteAfter);
+    }
 
     InitializeNativeDialogs();
+    return SendInstallRequestForPS5(file) ? 0 : EIO;
+}
+
+void InstallLocalPackage(const char *file, const char *name, const char *iconURI, bool deleteAfter)
+{
+    const int result = InstallLocalPackageResult(file, name, iconURI, deleteAfter);
+    if (result == 0)
+        printAndLogFmt(1, "Package installation succeeded.");
+    else
+        printAndLogFmt(3, "Package installation has failed with code: 0x%08X", result);
+}
+
+int InstallWebPackageResult(const char *url, const char *name, const char *titleId, const char *iconURI)
+{
+    PrintToConsole("Starting package installation...", 0);
+    if (!url || !*url || !name || !titleId || !iconURI)
+        return EINVAL;
 
     if (!IsPlayStation5())
-        status = installPKG(file, name, iconURI, deleteAfter) == 0;
+    {
+        const int initializationResult = InitializePackageServices();
+        if (initializationResult != 0)
+            return initializationResult;
+    }
     else
-        status = SendInstallRequestForPS5(file);
+        InitializeNativeDialogs();
 
-    printAndLogFmt(status ? 1 : 3, status ? "Package installation succeeded." : "Package installation has failed.");
+    std::string resolvedUrl;
+    const int redirectResult = ResolveRedirects(url, resolvedUrl);
+    if (redirectResult != 0)
+        return redirectResult;
+    if (resolvedUrl != url)
+        printAndLogFmt(0, "Redirected URL: %s", resolvedUrl.c_str());
+
+    return !IsPlayStation5()
+               ? installWebPKG(resolvedUrl.c_str(), name, titleId, iconURI)
+               : (SendInstallRequestForPS5(resolvedUrl.c_str()) ? 0 : EIO);
 }
 
 void InstallWebPackage(const char *url, const char *name, const char *titleId, const char *iconURI)
 {
-    PrintToConsole("Starting package installation...", 0);
-    InitializeNativeDialogs();
-
-    const char *redirected = FollowRedirects(url);
-    bool status = false;
-
-    if (redirected != url)
-    {
-        printAndLogFmt(0, "Redirected URL: %s", redirected);
-        url = redirected;
-    }
-
-    status = !IsPlayStation5()
-                 ? installWebPKG(url, name, titleId, iconURI) != 0
-                 : SendInstallRequestForPS5(url);
-
-    printAndLogFmt(status ? 1 : 3,
-                   status ? "Package installation succeeded."
-                          : "Package installation has failed.");
-
-    if (redirected != url)
-        free((void *)redirected);
+    const int result = InstallWebPackageResult(url, name, titleId, iconURI);
+    if (result == 0)
+        printAndLogFmt(1, "Package installation succeeded.");
+    else
+        printAndLogFmt(3, "Package installation has failed with code: 0x%08X", result);
 }
 
 void ExtractZipFile(const char *filePath, const char *outPath)

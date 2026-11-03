@@ -33,6 +33,7 @@ extern "C"
   void BreakFromSandbox();
   void MountInSandbox(const char *systemPath, const char *mountName);
   void UnmountFromSandbox(const char *mountName);
+  int InitializePackageServices();
   void InitializeNativeDialogs();
   void ExitApplication();
   void UpdateViaHomebrewStore(const char *query);

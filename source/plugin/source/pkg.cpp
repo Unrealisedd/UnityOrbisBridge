@@ -1,5 +1,9 @@
 #include "../headers/includes.hpp"
 
+#include <cerrno>
+#include <cstring>
+#include <sys/stat.h>
+
 bool sceAppInst_done = false;
 static bool s_bgft_initialized = false;
 static struct bgft_init_params s_bgft_init_params;
@@ -10,319 +14,344 @@ int PKG_ERROR(const char *name, int ret)
     return ret;
 }
 
-bool app_inst_util_init(void)
+int app_inst_util_init_result(void)
 {
-    int ret;
-
     if (sceAppInst_done)
-        goto done;
+        return 0;
 
     printAndLogFmt(0, "Initializing AppInstUtil...");
-
-    ret = sceAppInstUtilInitialize();
+    const int ret = sceAppInstUtilInitialize();
     if (ret)
     {
-        printAndLogFmt(4, "sceAppInstUtilInitialize failed: 0x%08X", ret);
-        goto err;
+        sceAppInst_done = false;
+        return PKG_ERROR("sceAppInstUtilInitialize failed", ret);
     }
 
     sceAppInst_done = true;
+    return 0;
+}
 
-done:
-    return true;
-
-err:
-    sceAppInst_done = false;
-    return false;
+bool app_inst_util_init(void)
+{
+    return app_inst_util_init_result() == 0;
 }
 
 void app_inst_util_fini(void)
 {
-    int ret;
-
     if (!sceAppInst_done)
         return;
 
-    ret = sceAppInstUtilTerminate();
+    const int ret = sceAppInstUtilTerminate();
     if (ret)
         printAndLogFmt(4, "sceAppInstUtilTerminate failed: 0x%08X", ret);
+    else
+        sceAppInst_done = false;
+}
 
-    sceAppInst_done = false;
+int bgft_init_result(void)
+{
+    if (s_bgft_initialized)
+        return 0;
+
+    memset(&s_bgft_init_params, 0, sizeof(s_bgft_init_params));
+    s_bgft_init_params.heapSize = BGFT_HEAP_SIZE;
+    s_bgft_init_params.heap = static_cast<uint8_t *>(malloc(s_bgft_init_params.heapSize));
+    if (!s_bgft_init_params.heap)
+        return PKG_ERROR("No memory for BGFT heap", ENOMEM);
+
+    memset(s_bgft_init_params.heap, 0, s_bgft_init_params.heapSize);
+    printAndLogFmt(0, "Initializing BGFT...");
+
+    const int ret = sceBgftServiceInit(&s_bgft_init_params);
+    if (ret)
+    {
+        free(s_bgft_init_params.heap);
+        memset(&s_bgft_init_params, 0, sizeof(s_bgft_init_params));
+        s_bgft_initialized = false;
+        return PKG_ERROR("sceBgftServiceInit failed", ret);
+    }
+
+    s_bgft_initialized = true;
+    return 0;
 }
 
 bool bgft_init(void)
 {
-    int ret;
-
-    if (s_bgft_initialized)
-        goto done;
-
-    memset(&s_bgft_init_params, 0, sizeof(s_bgft_init_params));
-    s_bgft_init_params.heapSize = BGFT_HEAP_SIZE;
-    s_bgft_init_params.heap = (uint8_t *)malloc(s_bgft_init_params.heapSize);
-
-    if (!s_bgft_init_params.heap)
-    {
-        printAndLogFmt(4, "No memory for BGFT heap.");
-        goto err;
-    }
-
-    memset(s_bgft_init_params.heap, 0, s_bgft_init_params.heapSize);
-
-    printAndLogFmt(0, "Initializing BGFT...");
-    ret = sceBgftServiceInit(&s_bgft_init_params);
-    if (ret)
-    {
-        printAndLogFmt(4, "sceBgftInitialize failed: 0x%08X", ret);
-        goto err_bgft_heap_free;
-    }
-
-    s_bgft_initialized = true;
-
-done:
-    return true;
-
-err_bgft_heap_free:
-    if (s_bgft_init_params.heap)
-    {
-        free(s_bgft_init_params.heap);
-        s_bgft_init_params.heap = NULL;
-    }
-
-    memset(&s_bgft_init_params, 0, sizeof(s_bgft_init_params));
-
-err:
-    s_bgft_initialized = false;
-    return false;
+    return bgft_init_result() == 0;
 }
 
 void bgft_fini(void)
 {
-    int ret;
-
     if (!s_bgft_initialized)
         return;
 
-    ret = sceBgftServiceTerm();
+    const int ret = sceBgftServiceTerm();
     if (ret)
-        printAndLogFmt(4, "sceBgftServiceTerm failed: 0x%08X", ret);
-
-    if (s_bgft_init_params.heap)
     {
-        free(s_bgft_init_params.heap);
-        s_bgft_init_params.heap = NULL;
+        printAndLogFmt(4, "sceBgftServiceTerm failed: 0x%08X", ret);
+        return;
     }
 
+    free(s_bgft_init_params.heap);
     memset(&s_bgft_init_params, 0, sizeof(s_bgft_init_params));
     s_bgft_initialized = false;
 }
 
-void *displayDownloadProgress(void *arguments)
+int displayDownloadProgress(void *arguments)
 {
-    struct install_args *args = (install_args *)arguments;
-    SceBgftTaskProgress progress_info;
+    struct install_args *args = static_cast<install_args *>(arguments);
+    if (!args)
+        return EINVAL;
 
-    std::string msg = std::string("Installing... [") + args->title_id + "] " + args->fname;
-
-    printAndLogFmt(1, msg.c_str());
-
+    SceBgftTaskProgress progressInfo;
+    memset(&progressInfo, 0, sizeof(progressInfo));
+    const std::string message = std::string("Installing... [") + args->title_id + "] " + args->fname;
+    printAndLogFmt(1, "%s", message.c_str());
     initiateProgressDialog(args->fname);
 
-    int prog = 0;
-    while (prog < 99)
+    struct stat packageInfo;
+    const uint64_t expectedPackageSize =
+        stat(args->path, &packageInfo) == 0 && packageInfo.st_size > 0
+            ? static_cast<uint64_t>(packageInfo.st_size)
+            : 0;
+
+    int result = 0;
+    for (;;)
     {
-        memset(&progress_info, 0, sizeof(progress_info));
+        memset(&progressInfo, 0, sizeof(progressInfo));
+        result = sceBgftServiceDownloadGetProgress(args->task_id, &progressInfo);
+        if (result)
+        {
+            PKG_ERROR("sceBgftServiceDownloadGetProgress", result);
+            break;
+        }
+        if (progressInfo.error_result != 0)
+        {
+            result = PKG_ERROR("BGFT_ERROR", progressInfo.error_result);
+            break;
+        }
 
-        int ret = sceBgftServiceDownloadGetProgress(args->task_id, &progress_info);
-        if (ret)
-            return (void *)(intptr_t)PKG_ERROR("sceBgftDownloadGetProgress", ret);
+        const uint64_t totalLength = progressInfo.lengthTotal > 0
+                                         ? static_cast<uint64_t>(progressInfo.lengthTotal)
+                                         : static_cast<uint64_t>(progressInfo.length);
+        const uint64_t transferred = progressInfo.lengthTotal > 0
+                                         ? static_cast<uint64_t>(progressInfo.transferredTotal)
+                                         : static_cast<uint64_t>(progressInfo.transferred);
+        if (totalLength > 0)
+        {
+            const bool transferComplete = transferred >= totalLength;
+            const bool sizeMatched = expectedPackageSize > 0 && totalLength == expectedPackageSize;
+            const bool copyPhaseActive = progressInfo.localCopyPercent > 0;
+            const bool installComplete =
+                transferComplete &&
+                ((sizeMatched && !copyPhaseActive) || progressInfo.localCopyPercent >= 100);
 
-        if (progress_info.transferred > 0 && progress_info.error_result != 0)
-            return (void *)(intptr_t)PKG_ERROR("BGFT_ERROR", progress_info.error_result);
+            int progress = transferComplete
+                               ? (installComplete ? 100 : 99)
+                               : static_cast<int>((static_cast<long double>(transferred) * 100.0L) /
+                                                  static_cast<long double>(totalLength));
+            if (progressInfo.preparingPercent > progress && progressInfo.preparingPercent < 100)
+                progress = progressInfo.preparingPercent;
+            if (progressInfo.localCopyPercent > progress && progressInfo.localCopyPercent < 100)
+                progress = progressInfo.localCopyPercent;
+            setProgressMsgText(progress, "%s", message.c_str());
 
-        prog = (uint32_t)(((float)progress_info.transferred / progress_info.length) * 100.f);
+            if (installComplete)
+                break;
+        }
 
-        setProgressMsgText(prog, msg.c_str());
+        sceKernelUsleep(100000);
     }
 
-    if (progress_info.error_result == 0)
-    {
-        if (args->delete_pkg)
-            unlink(args->path);
-    }
-    else
-        printAndLogFmt(4, "Installation of %s has failed with code: 0x%x", args->title_id, progress_info.error_result);
+    if (result == 0 && args->delete_pkg && unlink(args->path) != 0)
+        printAndLogFmt(2, "Installed package but could not delete %s: %s", args->path, strerror(errno));
 
     sceMsgDialogTerminate();
-
     free(args->title_id);
     free(args->path);
     free(args->fname);
     free(args);
     bgft_fini();
-
-    return NULL;
+    return result;
 }
 
-uint32_t installPKG(const char *fullpath, const char *name, const char *iconURI, bool deleteAfter)
+int installPKG(const char *fullpath, const char *name, const char *iconURI, bool deleteAfter)
 {
-    char title_id[16];
-    int is_app, ret = -1;
-    int task_id = -1;
-    uint64_t pkg_size;
+    if (!fullpath || !*fullpath || !name)
+        return EINVAL;
 
     printAndLogFmt(0, "Checking if file exists: %s", fullpath);
-    if (if_exists(fullpath))
+    struct stat packageInfo;
+    if (stat(fullpath, &packageInfo) != 0)
+        return PKG_ERROR("Failed to stat package file", errno ? errno : ENOENT);
+    if ((packageInfo.st_mode & S_IFREG) == 0 || packageInfo.st_size <= 0)
+        return PKG_ERROR("Invalid package file", EINVAL);
+
+    int ret = app_inst_util_init_result();
+    if (ret)
+        return ret;
+
+    ret = bgft_init_result();
+    if (ret)
+        return ret;
+
+    char titleId[16] = {0};
+    int isApp = 0;
+    ret = sceAppInstUtilGetTitleIdFromPkg(fullpath, titleId, &isApp);
+    if (ret)
     {
-        printAndLogFmt(0, "File found. Proceeding with installation.");
-        if (sceAppInst_done)
-        {
-            printAndLogFmt(0, "Initializing AppInstUtil...");
-            if (!app_inst_util_init())
-                return PKG_ERROR("AppInstUtil initialization failed", ret);
-        }
-
-        if (!bgft_init())
-            return PKG_ERROR("BGFT initialization failed", ret);
-
-        printAndLogFmt(0, "Retrieving Title ID from package...");
-        ret = sceAppInstUtilGetTitleIdFromPkg(fullpath, title_id, &is_app);
-        if (ret)
-            return PKG_ERROR("sceAppInstUtilGetTitleIdFromPkg failed", ret);
-
-        if (!iconURI || !*iconURI)
-            iconURI = "https://t4.ftcdn.net/jpg/01/25/36/71/360_F_125367167_JnrCHTqtZhAbWS3doG4tt631usPHiPnr.jpg";
-
-        ret = sceAppInstUtilAppGetSize(title_id, &pkg_size);
-        if (ret)
-            return PKG_ERROR("sceAppInstUtilAppGetSize failed", ret);
-
-        struct bgft_download_param_ex download_params;
-        memset(&download_params, 0, sizeof(download_params));
-        download_params.param.user_id = 0;
-        download_params.param.entitlement_type = 5;
-        download_params.param.id = "";
-        download_params.param.content_url = fullpath;
-        download_params.param.content_ex_url = "";
-        download_params.param.content_name = name;
-        download_params.param.icon_path = iconURI;
-        download_params.param.sku_id = "";
-        download_params.param.option = BGFT_TASK_OPTION_DISABLE_CDN_QUERY_PARAM;
-        download_params.param.playgo_scenario_id = "0";
-        download_params.param.release_date = "";
-        download_params.param.package_type = "";
-        download_params.param.package_sub_type = "";
-        download_params.param.package_size = pkg_size;
-        download_params.slot = 0;
-
-    retry:
-        printAndLogFmt(0, "Registering download task...");
-        ret = sceBgftServiceIntDownloadRegisterTaskByStorageEx(&download_params, &task_id);
-        if (ret == 0x80990088 || ret == 0x80990015)
-        {
-            printAndLogFmt(2, "Conflicting installation detected. Uninstalling existing title: [%s] %s!", title_id, name);
-            ret = sceAppInstUtilAppUnInstall(&title_id[0]);
-            if (ret != 0)
-                return PKG_ERROR("sceAppInstUtilAppUnInstall failed", ret);
-            goto retry;
-        }
-
-        if (ret)
-            return PKG_ERROR("sceBgftServiceIntDownloadRegisterTaskByStorageEx failed", ret);
-
-        if (ret == 0x80990086)
-        {
-            printAndLogFmt(2, "Installation already queued in notifcations, prompting user to cancel it.");
-            TextNotify(222, "Already queued in notifcations\nplease cancel it and retry.");
-            return ret;
-        }
-
-        ret = sceBgftServiceDownloadStartTask(task_id);
-        if (ret)
-            return PKG_ERROR("sceBgftDownloadStartTask failed", ret);
+        bgft_fini();
+        return PKG_ERROR("sceAppInstUtilGetTitleIdFromPkg failed", ret);
     }
-    else
+
+    if (!iconURI)
+        iconURI = "";
+
+    struct bgft_download_param_ex downloadParams;
+    memset(&downloadParams, 0, sizeof(downloadParams));
+    downloadParams.param.user_id = 0;
+    downloadParams.param.entitlement_type = 5;
+    downloadParams.param.id = "";
+    downloadParams.param.content_url = fullpath;
+    downloadParams.param.content_ex_url = "";
+    downloadParams.param.content_name = name;
+    downloadParams.param.icon_path = iconURI;
+    downloadParams.param.sku_id = "";
+    downloadParams.param.option = BGFT_TASK_OPTION_DISABLE_CDN_QUERY_PARAM;
+    downloadParams.param.playgo_scenario_id = "0";
+    downloadParams.param.release_date = "";
+    downloadParams.param.package_type = "";
+    downloadParams.param.package_sub_type = "";
+    downloadParams.param.package_size = static_cast<unsigned long>(packageInfo.st_size);
+    downloadParams.slot = 0;
+
+    int taskId = -1;
+    ret = sceBgftServiceIntDownloadRegisterTaskByStorageEx(&downloadParams, &taskId);
+    if (ret == static_cast<int>(0x80990088) || ret == static_cast<int>(0x80990015))
     {
-        printAndLogFmt(3, "Failed to open file: %s", fullpath);
+        printAndLogFmt(2, "Conflicting installation detected. Uninstalling existing title: [%s] %s!", titleId, name);
+        ret = sceAppInstUtilAppUnInstall(titleId);
+        if (ret)
+        {
+            bgft_fini();
+            return PKG_ERROR("sceAppInstUtilAppUnInstall failed", ret);
+        }
+        ret = sceBgftServiceIntDownloadRegisterTaskByStorageEx(&downloadParams, &taskId);
+    }
+
+    if (ret == static_cast<int>(0x80990086))
+    {
+        TextNotify(222, "Already queued in notifications\nplease cancel it and retry.");
+        bgft_fini();
         return ret;
     }
+    if (ret)
+    {
+        bgft_fini();
+        return PKG_ERROR("sceBgftServiceIntDownloadRegisterTaskByStorageEx failed", ret);
+    }
 
-    printAndLogFmt(0, "Allocating memory for install arguments...");
-    struct install_args *args = (struct install_args *)malloc(sizeof(struct install_args));
+    ret = sceBgftServiceDownloadStartTask(taskId);
+    if (ret)
+    {
+        bgft_fini();
+        return PKG_ERROR("sceBgftServiceDownloadStartTask failed", ret);
+    }
+
+    struct install_args *args = static_cast<install_args *>(calloc(1, sizeof(struct install_args)));
     if (!args)
-        return PKG_ERROR("Memory allocation failed", -1);
+    {
+        sceBgftServiceDownloadStopTask(taskId);
+        bgft_fini();
+        return PKG_ERROR("Memory allocation failed", ENOMEM);
+    }
 
-    args->title_id = strdup(title_id);
-    args->task_id = task_id;
+    args->title_id = strdup(titleId);
     args->path = strdup(fullpath);
     args->fname = strdup(name);
-    args->is_thread = false;
+    args->task_id = taskId;
     args->delete_pkg = deleteAfter;
+    if (!args->title_id || !args->path || !args->fname)
+    {
+        free(args->title_id);
+        free(args->path);
+        free(args->fname);
+        free(args);
+        sceBgftServiceDownloadStopTask(taskId);
+        bgft_fini();
+        return PKG_ERROR("Memory allocation failed", ENOMEM);
+    }
 
-    printAndLogFmt(0, "Starting download progress display thread...");
-    displayDownloadProgress((void *)args);
-
-    return 0;
+    return displayDownloadProgress(args);
 }
 
-uint32_t installWebPKG(const char *url, const char *name, const char *title_id, const char *iconURI)
+int installWebPKG(const char *url, const char *name, const char *titleId, const char *iconURI)
 {
-    int ret = -1, task_id = -1;
+    if (!url || !name || !titleId || !iconURI)
+        return EINVAL;
 
-    if (!bgft_init())
-        return PKG_ERROR("BGFT initialization failed", ret);
+    int ret = app_inst_util_init_result();
+    if (ret)
+        return ret;
+    ret = bgft_init_result();
+    if (ret)
+        return ret;
 
-    struct bgft_download_param download_params;
-    memset(&download_params, 0, sizeof(download_params));
+    struct bgft_download_param downloadParams;
+    memset(&downloadParams, 0, sizeof(downloadParams));
+    downloadParams.user_id = 0;
+    downloadParams.entitlement_type = 5;
+    downloadParams.id = "";
+    downloadParams.content_url = url;
+    downloadParams.content_ex_url = "";
+    downloadParams.content_name = name;
+    downloadParams.icon_path = iconURI;
+    downloadParams.sku_id = "";
+    downloadParams.option = BGFT_TASK_OPTION_DISABLE_CDN_QUERY_PARAM;
+    downloadParams.playgo_scenario_id = "0";
+    downloadParams.release_date = "";
+    downloadParams.package_type = "";
+    downloadParams.package_sub_type = "";
+    downloadParams.package_size = 0;
 
-    download_params.user_id = 0;
-    download_params.entitlement_type = 5;
-    download_params.id = "";
-    download_params.content_url = url;
-    download_params.content_ex_url = "";
-    download_params.content_name = name;
-    download_params.icon_path = iconURI;
-    download_params.sku_id = "";
-    download_params.option = BGFT_TASK_OPTION_DISABLE_CDN_QUERY_PARAM;
-    download_params.playgo_scenario_id = "0";
-    download_params.release_date = "";
-    download_params.package_type = "";
-    download_params.package_sub_type = "";
-    download_params.package_size = NULL;
-
-retry:
-    printAndLogFmt(0, "Registering web download task...");
-    ret = sceBgftServiceIntDebugDownloadRegisterPkg(&download_params, &task_id);
-    if (ret == 0x80F00633)
+    int taskId = -1;
+    ret = sceBgftServiceIntDebugDownloadRegisterPkg(&downloadParams, &taskId);
+    if (ret == static_cast<int>(0x80990088) || ret == static_cast<int>(0x80990015))
     {
-        printAndLogFmt(2, "Incorrect NP environment setting detected. Prompting user to change it.");
-        TextNotify(222, "Please change NP Environment\nin \"Debug Settings\" from\n \"NP\" to \"SP-INT\".");
-        ret = 0;
-    }
-
-    if (ret == 0x80990088 || ret == 0x80990015)
-    {
-        printAndLogFmt(2, "Conflicting installation detected. Uninstalling existing title: [%s] %s!", title_id, name);
-        ret = sceAppInstUtilAppUnInstall(title_id);
-        if (ret != 0)
+        printAndLogFmt(2, "Conflicting installation detected. Uninstalling existing title: [%s] %s!", titleId, name);
+        ret = sceAppInstUtilAppUnInstall(titleId);
+        if (ret)
+        {
+            bgft_fini();
             return PKG_ERROR("sceAppInstUtilAppUnInstall failed", ret);
-        goto retry;
+        }
+        ret = sceBgftServiceIntDebugDownloadRegisterPkg(&downloadParams, &taskId);
     }
 
-    if (ret == 0x80990086)
+    if (ret == static_cast<int>(0x80F00633))
     {
-        printAndLogFmt(2, "Installation already queued in notifcations, prompting user to cancel it.");
-        TextNotify(222, "Already queued in notifcations\nplease cancel it and retry.");
+        TextNotify(222, "Please change NP Environment\nin Debug Settings from NP to SP-INT.");
+        bgft_fini();
+        return PKG_ERROR("Incorrect NP environment", ret);
+    }
+    if (ret == static_cast<int>(0x80990086))
+    {
+        TextNotify(222, "Already queued in notifications\nplease cancel it and retry.");
+        bgft_fini();
         return ret;
     }
-
     if (ret)
+    {
+        bgft_fini();
         return PKG_ERROR("sceBgftServiceIntDebugDownloadRegisterPkg failed", ret);
+    }
 
-    printAndLogFmt(0, "Starting web download task: %d", task_id);
-    ret = sceBgftServiceDownloadStartTask(task_id);
+    ret = sceBgftServiceDownloadStartTask(taskId);
     if (ret)
-        return PKG_ERROR("sceBgftDownloadStartTask failed", ret);
+    {
+        bgft_fini();
+        return PKG_ERROR("sceBgftServiceDownloadStartTask failed", ret);
+    }
 
     return 0;
 }
@@ -370,6 +399,5 @@ bool SendInstallRequestForPS5(const char *url)
 
     buffer[bytesRead] = '\0';
     printAndLogFmt(0, "Response: %s", buffer);
-
     return std::string(buffer).find("\"res\" : \"0\"") != std::string::npos;
 }
