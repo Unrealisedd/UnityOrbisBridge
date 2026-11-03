@@ -1,6 +1,7 @@
 #include "../headers/includes.hpp"
 
 #include <cerrno>
+#include <cstdlib>
 #include <climits>
 #include <cstdio>
 #include <cstring>
@@ -792,10 +793,25 @@ int ResolveRedirects(const char *url, std::string &resolvedUrl)
 
 const char *FollowRedirects(const char *url)
 {
-    static thread_local std::string resolvedUrl;
+    static thread_local char *resolvedBuffer = NULL;
+    static thread_local size_t resolvedCapacity = 0;
+
+    std::string resolvedUrl;
     if (ResolveRedirects(url, resolvedUrl) != CURLE_OK)
         resolvedUrl = url ? url : "";
-    return resolvedUrl.c_str();
+
+    const size_t required = resolvedUrl.size() + 1;
+    if (required > resolvedCapacity)
+    {
+        void *grown = realloc(resolvedBuffer, required);
+        if (!grown)
+            return url ? url : "";
+        resolvedBuffer = static_cast<char *>(grown);
+        resolvedCapacity = required;
+    }
+
+    memcpy(resolvedBuffer, resolvedUrl.c_str(), required);
+    return resolvedBuffer;
 }
 
 extern "C"
