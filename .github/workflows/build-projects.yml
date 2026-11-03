@@ -148,6 +148,7 @@ jobs:
           cd UnityOrbisBridge
           sha256sum --binary UnityOrbisBridge.prx UnityOrbisBridge.dll > SHA256SUMS
           cat SHA256SUMS
+          sha256sum --check SHA256SUMS
 
       - name: Upload combined artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
