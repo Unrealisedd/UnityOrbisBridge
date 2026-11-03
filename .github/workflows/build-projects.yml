@@ -146,7 +146,7 @@ jobs:
       - name: Create provenance hashes
         run: |
           cd UnityOrbisBridge
-          sha256sum UnityOrbisBridge.prx UnityOrbisBridge.dll > SHA256SUMS
+          sha256sum --binary UnityOrbisBridge.prx UnityOrbisBridge.dll > SHA256SUMS
           cat SHA256SUMS
 
       - name: Upload combined artifacts
