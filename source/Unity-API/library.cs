@@ -11,19 +11,27 @@ namespace UnityOrbisBridge
         [DllImport("UnityOrbisBridge")] public static extern IntPtr GetDiskInfo(string infoType, string mountPoint = "/user");
         #endregion
 
-        [DllImport("UnityOrbisBridge")] public static extern void DownloadWebFile(string url, string pathWithFile, bool bgDL = false, string name = "NULL");
+        [DllImport("UnityOrbisBridge")]
+        public static extern void DownloadWebFile(
+            string url,
+            string pathWithFile,
+            [MarshalAs(UnmanagedType.I1)] bool bgDL = false,
+            string name = "NULL");
     }
 
     public static partial class UOB
     {
         #region cURL Web Interactions
         [DllImport("UnityOrbisBridge")] public static extern IntPtr GetDownloadInfo(string info);
+        [return: MarshalAs(UnmanagedType.I1)]
         [DllImport("UnityOrbisBridge")] public static extern bool HasDownloadCompleted();
+        [return: MarshalAs(UnmanagedType.I1)]
         [DllImport("UnityOrbisBridge")] public static extern bool HasDownloadErrorOccured();
         [DllImport("UnityOrbisBridge")] public static extern void ResetDownloadVars();
         [DllImport("UnityOrbisBridge")] public static extern void CancelDownload();
         [DllImport("UnityOrbisBridge")] public static extern IntPtr DownloadAsBytes(string url, out int size);
         [DllImport("UnityOrbisBridge")] public static extern IntPtr DownloadAsBytesRange(string url, uint offset, uint size, out int out_size);
+        [return: MarshalAs(UnmanagedType.I1)]
         [DllImport("UnityOrbisBridge")] public static extern bool IsInternetAvailable();
 
         #endregion
@@ -37,7 +45,8 @@ namespace UnityOrbisBridge
         #endregion
 
         #region System Information
-        [DllImport("UnityOrbisBridge")] public static extern bool IsPlayStation5(); 
+        [return: MarshalAs(UnmanagedType.I1)]
+        [DllImport("UnityOrbisBridge")] public static extern bool IsPlayStation5();
         [DllImport("UnityOrbisBridge")] public static extern IntPtr GetFWVersion();
         [DllImport("UnityOrbisBridge")] public static extern IntPtr GetConsoleType();
         [DllImport("UnityOrbisBridge")] public static extern int GetSystemLanguageID();
@@ -57,15 +66,22 @@ namespace UnityOrbisBridge
         [DllImport("UnityOrbisBridge")] public static extern void WriteFile(string content, string filePath = "/data/UnityOrbisBridge.log");
         [DllImport("UnityOrbisBridge")] public static extern void AppendFile(string content, string filePath = "/data/UnityOrbisBridge.log");
         [DllImport("UnityOrbisBridge")] public static extern void MountRootDirectories();
-        [DllImport("UnityOrbisBridge")] public static extern void InstallLocalPackage(string filePath, string name, string iconURI, bool deleteAfter);
+        [DllImport("UnityOrbisBridge")]
+        public static extern void InstallLocalPackage(
+            string filePath,
+            string name,
+            string iconURI,
+            [MarshalAs(UnmanagedType.I1)] bool deleteAfter);
         [DllImport("UnityOrbisBridge")] public static extern void InstallWebPackage(string url, string name, string titleId, string iconURI);
         [DllImport("UnityOrbisBridge")] public static extern void ExtractZipFile(string filePath, string outPath);
+        [return: MarshalAs(UnmanagedType.I1)]
         [DllImport("UnityOrbisBridge")] public static extern bool CheckIfAppExists(string titleId);
 
         #endregion
 
         #region Application Operations
         [DllImport("UnityOrbisBridge")] public static extern void InitializeNativeDialogs();
+        [return: MarshalAs(UnmanagedType.I1)]
         [DllImport("UnityOrbisBridge")] public static extern bool IsFreeOfSandbox();
         [DllImport("UnityOrbisBridge")]public static extern void EnterSandbox();
         [DllImport("UnityOrbisBridge")] public static extern void BreakFromSandbox();
